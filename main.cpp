@@ -1,4 +1,9 @@
 #include "pch.h"
+#include "Serialization.h"
+#include "SerializationImpl.h"
+
+using sg::serializer;
+using sg::deserializer;
 
 template<class T>
 struct generator
@@ -45,8 +50,8 @@ struct generator
     iterator begin() { m_handle.resume(); return { m_handle, m_handle.done() }; }
     iterator end() { return { {}, true }; }
 
-    void serialize(std::ostream& os);
-    void deserialize(std::istream& os);
+    void serialize(serializer& s);
+    void deserialize(deserializer& d);
 
 private:
     generator(handle h) : m_handle(h) {}
@@ -70,7 +75,7 @@ ModuleRVA GetRVA(void* addr)
 }
 
 template<class T>
-void generator<T>::serialize(std::ostream& os)
+void generator<T>::serialize(serializer& s)
 {
     auto* ptr = (byte*)m_handle.address();
 
@@ -85,44 +90,39 @@ void generator<T>::serialize(std::ostream& os)
     ::GetModuleFileNameA(mod, buf, std::size(buf));
 
     std::string module_name{ std::strrchr(buf, '\\') + 1 };
-    uint32_t module_len = uint32_t(module_name.size());
-    os.write((char*)&module_len, sizeof(uint32_t));
-    os.write(module_name.c_str(), module_len);
+    sgWrite(module_name);
 
     uint32_t resume_rva = uint32_t((size_t)resume_addr - (size_t)mod);
     uint32_t destroy_rva = uint32_t((size_t)destroy_addr - (size_t)mod);
-    os.write((char*)&resume_rva, sizeof(uint32_t));
-    os.write((char*)&destroy_rva, sizeof(uint32_t));
+    sgWrite(resume_rva);
+    sgWrite(destroy_rva);
 
     uint32_t data_size = uint32_t(size_t(frame_end) - size_t(ptr));
-    os.write((char*)&data_size, sizeof(uint32_t));
-    os.write((char*)ptr, data_size);
+    sgWrite(data_size);
+    s.write(ptr, data_size);
 }
 
 template<class T>
-void generator<T>::deserialize(std::istream& is)
+void generator<T>::deserialize(deserializer& d)
 {
     auto* ptr = (byte*)m_handle.address();
     void** resume_addr = (void**)(ptr); ptr += sizeof(void*);
     void** destroy_addr = (void**)(ptr); ptr += sizeof(void*);
 
     std::string module_name;
-    uint32_t module_len;
-    is.read((char*)&module_len, sizeof(uint32_t));
-    module_name.resize(module_len);
-    is.read(module_name.data(), module_len);
-
-    HMODULE hmod = ::GetModuleHandleA(module_name.c_str());
     uint32_t resume_rva;
     uint32_t destroy_rva;
-    is.read((char*)&resume_rva, sizeof(uint32_t));
-    is.read((char*)&destroy_rva, sizeof(uint32_t));
+    sgRead(module_name);
+    sgRead(resume_rva);
+    sgRead(destroy_rva);
+
+    HMODULE hmod = ::GetModuleHandleA(module_name.c_str());
     *resume_addr = (byte*)hmod + resume_rva;
     *destroy_addr = (byte*)hmod + destroy_rva;
 
     uint32_t data_size;
-    is.read((char*)&data_size, sizeof(uint32_t));
-    is.read((char*)ptr, data_size);
+    sgRead(data_size);
+    d.read((char*)ptr, data_size);
 }
 
 
@@ -140,16 +140,18 @@ int main(int argc, char** argv)
     if (argc >= 2) {
         std::fstream fin(argv[1], std::ios::in | std::ios::binary);
         if (fin) {
-            g.deserialize(fin);
+            deserializer d(fin);
+            g.deserialize(d);
         }
     }
     else {
-        std::fstream fout("data.bin", std::ios::out | std::ios::binary);
+        g.move_next();
+        g.move_next();
+        g.move_next();
 
-        g.move_next();
-        g.move_next();
-        g.move_next();
-        g.serialize(fout);
+        std::fstream fout("data.bin", std::ios::out | std::ios::binary);
+        serializer s(fout);
+        g.serialize(s);
     }
 
     for (auto i : g) {
